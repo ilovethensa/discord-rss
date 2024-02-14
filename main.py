@@ -82,7 +82,7 @@ async def on_disconnect():
 
 
 async def refresh_rss():
-    setup_completed, channel_id, _, rss_feed_urls = get_setup_data()
+    setup_completed, channel_id, refresh_interval, rss_feed_urls = get_setup_data()
     if setup_completed:
         channel = client.get_channel(channel_id)
         for rss_url in rss_feed_urls:
@@ -134,7 +134,7 @@ async def setup(ctx, channel_id: int = None, rss_url: str = None):
     - channel_id: The ID of the channel where RSS feed updates will be posted.
     - rss_url: The URL of the RSS feed to track.
     """
-    global CHANNEL_ID, setup_completed, RSS_FEED_URLS, refresh_interval
+    setup_completed, _, refresh_interval, rss_feed_urls = get_setup_data()
     if setup_completed:
         await ctx.send(f"Setup already done, to reset the bot please delete main.db")
         return
@@ -145,11 +145,11 @@ async def setup(ctx, channel_id: int = None, rss_url: str = None):
         )
         return
 
-    CHANNEL_ID, setup_completed = channel_id, True
+    channel_id, setup_completed = channel_id, True
 
     c.execute(
         "INSERT OR REPLACE INTO bot_config (key, value) VALUES (?, ?)",
-        ("channel_id", str(CHANNEL_ID)),
+        ("channel_id", str(channel_id)),
     )
     c.execute(
         "INSERT OR REPLACE INTO bot_config (key, value) VALUES (?, ?)",
@@ -159,7 +159,7 @@ async def setup(ctx, channel_id: int = None, rss_url: str = None):
     c.execute("INSERT OR IGNORE INTO rss_feeds (url) VALUES (?)", (rss_url,))
     conn.commit()
 
-    setup_completed, _, refresh_interval, RSS_FEED_URLS = get_setup_data()
+    setup_completed, _, refresh_interval, rss_feed_urls = get_setup_data()
 
     await ctx.send(
         f"Setup completed! Channel ID set to {channel_id} and first RSS feed added: {rss_url}"
@@ -176,7 +176,7 @@ async def add_feed(ctx, rss_url: str):
     Parameters:
     - rss_url: The URL of the RSS feed to add.
     """
-    global RSS_FEED_URLS, setup_completed
+    setup_completed, channel_id, refresh_interval, rss_feed_urls = get_setup_data()
     if not setup_completed:
         await ctx.send("Please complete the setup using the `!setup` command.")
         return
@@ -188,8 +188,6 @@ async def add_feed(ctx, rss_url: str):
     c.execute("INSERT OR IGNORE INTO rss_feeds (url) VALUES (?)", (rss_url,))
     conn.commit()
 
-    setup_completed, _, _, RSS_FEED_URLS = get_setup_data()
-
     await ctx.send(f"Added new RSS feed: {rss_url}")
     await refresh_rss()
 
@@ -200,16 +198,16 @@ async def list_feeds(ctx):
     """
     List all added RSS feeds.
     """
-    global RSS_FEED_URLS, setup_completed
+    setup_completed, channel_id, refresh_interval, rss_feed_urls = get_setup_data()
     if not setup_completed:
         await ctx.send("Please complete the setup using the `!setup` command.")
         return
 
-    if not RSS_FEED_URLS:
+    if not rss_feed_urls:
         await ctx.send("No feeds added yet.")
         return
 
-    feed_list = "\n".join(RSS_FEED_URLS)
+    feed_list = "\n".join(rss_feed_urls)
     await ctx.send(f"List of RSS feeds:\n{feed_list}")
 
 
@@ -222,7 +220,7 @@ async def remove_feed(ctx, rss_url: str):
     Parameters:
     - rss_url: The URL of the RSS feed to remove.
     """
-    global RSS_FEED_URLS, setup_completed
+    setup_completed, channel_id, refresh_interval, rss_feed_urls = get_setup_data()
     if not setup_completed:
         await ctx.send("Please complete the setup using the `!setup` command.")
         return
@@ -231,14 +229,12 @@ async def remove_feed(ctx, rss_url: str):
         await ctx.send("Please provide the RSS feed URL:\n`!remove_feed <rss_url>`")
         return
 
-    if rss_url not in RSS_FEED_URLS:
+    if rss_url not in rss_feed_urls:
         await ctx.send(f"The provided RSS feed URL is not in the list.")
         return
 
     c.execute("DELETE FROM rss_feeds WHERE url=?", (rss_url,))
     conn.commit()
-
-    setup_completed, _, _, RSS_FEED_URLS = get_setup_data()
 
     await ctx.send(f"Removed RSS feed: {rss_url}")
     await refresh_rss()
@@ -250,7 +246,7 @@ async def print_config(ctx):
     """
     Print all values from bot_config.
     """
-    global setup_completed, CHANNEL_ID, RSS_FEED_URLS, refresh_interval
+    setup_completed, channel_id, refresh_interval, rss_feed_urls = get_setup_data()
     if not setup_completed:
         await ctx.send("Please complete the setup using the `!setup` command.")
         return
@@ -274,7 +270,6 @@ async def set_refresh_interval(ctx, seconds: int):
     Parameters:
     - seconds: The time interval in seconds between RSS feed refreshes.
     """
-    global refresh_task
     if seconds <= 0:
         await ctx.send("Please provide a positive value for the refresh interval.")
         return
