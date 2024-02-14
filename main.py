@@ -250,6 +250,3 @@ async def set_refresh_interval(ctx, seconds: int):
 
 
 client.run(TOKEN)
-
-# Close the database connection when your bot shuts down
-# conn.close()
