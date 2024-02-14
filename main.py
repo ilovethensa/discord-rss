@@ -29,38 +29,44 @@ c.execute(
              (key TEXT PRIMARY KEY, value TEXT)"""
 )
 
-# Check if setup is completed from the database
-setup_completed = c.execute(
-    "SELECT value FROM bot_config WHERE key=?", ("setup_completed",)
-).fetchone()
-setup_completed = setup_completed[0] == "True" if setup_completed else False
 
-# Get CHANNEL_ID from the database
-CHANNEL_ID = (
-    int(
-        c.execute(
-            "SELECT value FROM bot_config WHERE key=?", ("channel_id",)
-        ).fetchone()[0]
-    )
-    if setup_completed
-    else 1
-)
-
-# Get the refresh interval from the database or set a default value
-refresh_interval = (
-    int(
-        c.execute(
-            "SELECT value FROM bot_config WHERE key=?", ("refresh_interval",)
-        ).fetchone()[0]
-    )
-    if c.execute(
-        "SELECT value FROM bot_config WHERE key=?", ("refresh_interval",)
+def get_setup_data():
+    setup_completed = c.execute(
+        "SELECT value FROM bot_config WHERE key=?", ("setup_completed",)
     ).fetchone()
-    else 500
-)
+    setup_completed = setup_completed[0] == "True" if setup_completed else False
 
-# Initialize RSS_FEED_URLS from the database
-RSS_FEED_URLS = [feed[0] for feed in c.execute("SELECT url FROM rss_feeds").fetchall()]
+    channel_id = (
+        int(
+            c.execute(
+                "SELECT value FROM bot_config WHERE key=?", ("channel_id",)
+            ).fetchone()[0]
+        )
+        if setup_completed
+        else 1
+    )
+
+    refresh_interval = (
+        int(
+            c.execute(
+                "SELECT value FROM bot_config WHERE key=?", ("refresh_interval",)
+            ).fetchone()[0]
+        )
+        if c.execute(
+            "SELECT value FROM bot_config WHERE key=?", ("refresh_interval",)
+        ).fetchone()
+        else 500
+    )
+
+    rss_feed_urls = [
+        feed[0] for feed in c.execute("SELECT url FROM rss_feeds").fetchall()
+    ]
+
+    return setup_completed, channel_id, refresh_interval, rss_feed_urls
+
+
+# Check if setup is completed from the database
+setup_completed, CHANNEL_ID, refresh_interval, RSS_FEED_URLS = get_setup_data()
 
 
 @client.event
@@ -70,10 +76,10 @@ async def on_ready():
 
 
 async def refresh_rss():
-    global c, CHANNEL_ID, setup_completed, RSS_FEED_URLS
+    setup_completed, channel_id, _, rss_feed_urls = get_setup_data()
     if setup_completed:
-        channel = client.get_channel(CHANNEL_ID)
-        for rss_url in RSS_FEED_URLS:
+        channel = client.get_channel(channel_id)
+        for rss_url in rss_feed_urls:
             print(f"Checking: {rss_url}")
             feed = feedparser.parse(rss_url)
             latest_entries = feed.entries[:5]
@@ -105,6 +111,9 @@ async def refresh_task():
 @client.command(description="Manually refresh RSS feeds.")
 @commands.has_permissions(administrator=True)
 async def refresh_feeds(ctx):
+    """
+    Manually refreshes RSS feeds.
+    """
     await refresh_rss()
     await ctx.send("Manually refreshed RSS feeds.")
 
@@ -112,7 +121,14 @@ async def refresh_feeds(ctx):
 @client.command(description="Set up the bot to track RSS feeds in a specific channel.")
 @commands.has_permissions(administrator=True)
 async def setup(ctx, channel_id: int = None, rss_url: str = None):
-    global CHANNEL_ID, setup_completed, RSS_FEED_URLS
+    """
+    Set up the bot to track RSS feeds in a specific channel.
+
+    Parameters:
+    - channel_id: The ID of the channel where RSS feed updates will be posted.
+    - rss_url: The URL of the RSS feed to track.
+    """
+    global CHANNEL_ID, setup_completed, RSS_FEED_URLS, refresh_interval
     if setup_completed:
         await ctx.send(f"Setup already done, to reset the bot please delete main.db")
         return
@@ -137,9 +153,7 @@ async def setup(ctx, channel_id: int = None, rss_url: str = None):
     c.execute("INSERT OR IGNORE INTO rss_feeds (url) VALUES (?)", (rss_url,))
     conn.commit()
 
-    RSS_FEED_URLS = [
-        feed[0] for feed in c.execute("SELECT url FROM rss_feeds").fetchall()
-    ]
+    setup_completed, _, refresh_interval, RSS_FEED_URLS = get_setup_data()
 
     await ctx.send(
         f"Setup completed! Channel ID set to {channel_id} and first RSS feed added: {rss_url}"
@@ -150,6 +164,12 @@ async def setup(ctx, channel_id: int = None, rss_url: str = None):
 @client.command(description="Add a new RSS feed to the list.")
 @commands.has_permissions(administrator=True)
 async def add_feed(ctx, rss_url: str):
+    """
+    Add a new RSS feed to the list.
+
+    Parameters:
+    - rss_url: The URL of the RSS feed to add.
+    """
     global RSS_FEED_URLS, setup_completed
     if not setup_completed:
         await ctx.send("Please complete the setup using the `!setup` command.")
@@ -162,16 +182,18 @@ async def add_feed(ctx, rss_url: str):
     c.execute("INSERT OR IGNORE INTO rss_feeds (url) VALUES (?)", (rss_url,))
     conn.commit()
 
-    RSS_FEED_URLS = [
-        feed[0] for feed in c.execute("SELECT url FROM rss_feeds").fetchall()
-    ]
+    setup_completed, _, _, RSS_FEED_URLS = get_setup_data()
+
     await ctx.send(f"Added new RSS feed: {rss_url}")
     await refresh_rss()
 
 
-@client.command()
+@client.command(description="List all added RSS feeds.")
 @commands.has_permissions(administrator=True)
 async def list_feeds(ctx):
+    """
+    List all added RSS feeds.
+    """
     global RSS_FEED_URLS, setup_completed
     if not setup_completed:
         await ctx.send("Please complete the setup using the `!setup` command.")
@@ -185,9 +207,15 @@ async def list_feeds(ctx):
     await ctx.send(f"List of RSS feeds:\n{feed_list}")
 
 
-@client.command()
+@client.command(description="Remove an RSS feed from the list.")
 @commands.has_permissions(administrator=True)
 async def remove_feed(ctx, rss_url: str):
+    """
+    Remove an RSS feed from the list.
+
+    Parameters:
+    - rss_url: The URL of the RSS feed to remove.
+    """
     global RSS_FEED_URLS, setup_completed
     if not setup_completed:
         await ctx.send("Please complete the setup using the `!setup` command.")
@@ -204,9 +232,8 @@ async def remove_feed(ctx, rss_url: str):
     c.execute("DELETE FROM rss_feeds WHERE url=?", (rss_url,))
     conn.commit()
 
-    RSS_FEED_URLS = [
-        feed[0] for feed in c.execute("SELECT url FROM rss_feeds").fetchall()
-    ]
+    setup_completed, _, _, RSS_FEED_URLS = get_setup_data()
+
     await ctx.send(f"Removed RSS feed: {rss_url}")
     await refresh_rss()
 
@@ -214,7 +241,10 @@ async def remove_feed(ctx, rss_url: str):
 @client.command(description="Print all values from bot_config.")
 @commands.has_permissions(administrator=True)
 async def print_config(ctx):
-    global setup_completed, CHANNEL_ID, RSS_FEED_URLS
+    """
+    Print all values from bot_config.
+    """
+    global setup_completed, CHANNEL_ID, RSS_FEED_URLS, refresh_interval
     if not setup_completed:
         await ctx.send("Please complete the setup using the `!setup` command.")
         return
@@ -232,6 +262,12 @@ async def print_config(ctx):
 @client.command(description="Set the time between RSS feed refreshes.")
 @commands.has_permissions(administrator=True)
 async def set_refresh_interval(ctx, seconds: int):
+    """
+    Set the time between RSS feed refreshes.
+
+    Parameters:
+    - seconds: The time interval in seconds between RSS feed refreshes.
+    """
     global refresh_task
     if seconds <= 0:
         await ctx.send("Please provide a positive value for the refresh interval.")
@@ -245,6 +281,8 @@ async def set_refresh_interval(ctx, seconds: int):
         ("refresh_interval", str(seconds)),
     )
     conn.commit()
+
+    setup_completed, _, refresh_interval, _ = get_setup_data()
 
     await ctx.send(f"Refresh interval set to {seconds} seconds.")
 
