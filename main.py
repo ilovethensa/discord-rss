@@ -75,6 +75,12 @@ async def on_ready():
     refresh_task.start()
 
 
+@client.event
+async def on_disconnect():
+    print("Bot is disconnecting. Closing database connection.")
+    conn.close()  # You happy now, okko?
+
+
 async def refresh_rss():
     setup_completed, channel_id, _, rss_feed_urls = get_setup_data()
     if setup_completed:
