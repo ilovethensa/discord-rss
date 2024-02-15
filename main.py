@@ -6,7 +6,7 @@ import feedparser
 from datetime import datetime
 import os
 
-GUILD_ID = 1149848143534493779
+GUILD_ID = 1234  # REPLACE ME
 
 
 TOKEN = os.getenv("DISCORD_TOKEN")
