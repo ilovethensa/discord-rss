@@ -1,3 +1,4 @@
+import asyncio
 import sqlite3
 import discord
 from discord import app_commands
@@ -6,74 +7,118 @@ import feedparser
 from datetime import datetime
 import os
 
-GUILD_ID = 1234  # REPLACE ME
-
-
+GUILD_ID = os.getenv("GUILD_ID")
+REFRESH_INTERVAL = 500
 TOKEN = os.getenv("DISCORD_TOKEN")
 
+# Constants for message types
+INFO = "info"
+WARNING = "warning"
+ERROR = "error"
+SUCCESS = "success"
 
-def log(message, message_type="info"):
+# Constants for database setup
+DB_NAME = "main.db"
+TABLES = {
+    "sent_messages": "(identifier TEXT PRIMARY KEY, timestamp DATETIME DEFAULT CURRENT_TIMESTAMP)",
+    "rss_feeds": "(url TEXT PRIMARY KEY)",
+    "bot_config": "(key TEXT PRIMARY KEY, value TEXT)",
+}
+
+
+def log(message, message_type=INFO):
     current_date = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     formatted_message = f"[ {current_date} ] {message}"
-
-    if message_type == "warning":
-        colored_message = f"\033[93m{formatted_message}\033[0m"  # Yellow
-    elif message_type == "error":
-        colored_message = f"\033[91m{formatted_message}\033[0m"  # Red
-    elif message_type == "success":
-        colored_message = f"\033[92m{formatted_message}\033[0m"  # Green
-    else:
-        colored_message = formatted_message
-
+    colored_message = {
+        WARNING: f"\033[93m{formatted_message}\033[0m",
+        ERROR: f"\033[91m{formatted_message}\033[0m",
+        SUCCESS: f"\033[92m{formatted_message}\033[0m",
+    }.get(message_type, formatted_message)
     print(colored_message)
 
 
-class aclient(discord.Client):
-    def __init__(self):
+class DatabaseManager:
+    def __init__(self, db_name):
+        self.conn = sqlite3.connect(db_name)
+        self.c = self.conn.cursor()  # Initialize the cursor
+        self.create_tables()
+
+    def create_tables(self):
+        for table, columns in TABLES.items():
+            self.c.execute(f"CREATE TABLE IF NOT EXISTS {table} {columns}")
+
+    def execute_query(self, query, *args):
+        return self.c.execute(query, args)
+
+    def commit(self):
+        self.conn.commit()
+
+    def close(self):
+        self.conn.close()
+
+
+class RSSBot(discord.Client):
+    def __init__(self, guild_id, db_manager):
         super().__init__(intents=discord.Intents.default())
-        self.synced = (
-            False  # we use this so the bot doesn't sync commands more than once
-        )
+        self.guild_id = guild_id
+        self.db_manager = db_manager
+        self.synced = False
 
     async def on_ready(self):
         await self.wait_until_ready()
-        if not self.synced:  # check if slash commands have been synced
-            await tree.sync(
-                guild=discord.Object(id=GUILD_ID)
-            )  # guild specific: leave blank if global (global registration can take 1-24 hours)
+        if not self.synced:
+            await tree.sync(guild=discord.Object(id=self.guild_id))
             self.synced = True
-        log(f"We have logged in as {self.user}.", "success")
-        await refresh_rss()
+        log(f"We have logged in as {self.user}.", SUCCESS)
+        await asyncio.gather(refresh_rss(), refresh_task.start())
+
+    async def on_disconnect(self):
+        log("Bot is disconnecting. Closing database connection.", ERROR)
+        self.db_manager.close()
 
 
-conn = sqlite3.connect("main.db")
-c = conn.cursor()
+async def refresh_rss():
+    setup_completed, channel_id, refresh_interval, rss_feed_urls = get_setup_data()
+    if setup_completed:
+        # Obtain the connection from the DatabaseManager instance
+        conn = client.db_manager.conn
+        channel = client.get_channel(channel_id)
+        for rss_url in rss_feed_urls:
+            log(f"Checking: {rss_url}", INFO)
+            feed = feedparser.parse(rss_url)
+            latest_entries = feed.entries[:5]
 
-c.execute(
-    """CREATE TABLE IF NOT EXISTS sent_messages
-             (identifier TEXT PRIMARY KEY, timestamp DATETIME DEFAULT CURRENT_TIMESTAMP)"""
-)
+            for entry in latest_entries:
+                message_content = f"**{entry.title}**\n{entry.link}"
+                message_id = entry.link
 
-c.execute(
-    """CREATE TABLE IF NOT EXISTS rss_feeds
-             (url TEXT PRIMARY KEY)"""
-)
-
-c.execute(
-    """CREATE TABLE IF NOT EXISTS bot_config
-             (key TEXT PRIMARY KEY, value TEXT)"""
-)
+                if not conn.execute(
+                    "SELECT * FROM sent_messages WHERE identifier=?", (message_id,)
+                ).fetchone():
+                    message = await channel.send(message_content)
+                    thread = await message.create_thread(
+                        name=entry.title, auto_archive_duration=60
+                    )
+                    conn.execute(
+                        "INSERT INTO sent_messages (identifier) VALUES (?)",
+                        (message_id,),
+                    )
+                    conn.commit()
+        log("refreshing feeds: DONE", INFO)
 
 
 def get_setup_data():
-    setup_completed = c.execute(
+    # Obtain the connection from the DatabaseManager instance
+    conn = client.db_manager.conn
+
+    setup_completed = conn.execute(
         "SELECT value FROM bot_config WHERE key=?", ("setup_completed",)
     ).fetchone()
     setup_completed = setup_completed[0] == "True" if setup_completed else False
 
     channel_id = (
         int(
-            c.execute(
+            conn.execute(
                 "SELECT value FROM bot_config WHERE key=?", ("channel_id",)
             ).fetchone()[0]
         )
@@ -83,76 +128,42 @@ def get_setup_data():
 
     refresh_interval = (
         int(
-            c.execute(
+            conn.execute(
                 "SELECT value FROM bot_config WHERE key=?", ("refresh_interval",)
             ).fetchone()[0]
         )
-        if c.execute(
+        if conn.execute(
             "SELECT value FROM bot_config WHERE key=?", ("refresh_interval",)
         ).fetchone()
-        else 500
+        else REFRESH_INTERVAL
     )
 
     rss_feed_urls = [
-        feed[0] for feed in c.execute("SELECT url FROM rss_feeds").fetchall()
+        feed[0] for feed in conn.execute("SELECT url FROM rss_feeds").fetchall()
     ]
 
     return setup_completed, channel_id, refresh_interval, rss_feed_urls
 
 
-async def refresh_rss():
-    setup_completed, channel_id, refresh_interval, rss_feed_urls = get_setup_data()
-    if setup_completed:
-        channel = client.get_channel(channel_id)
-        for rss_url in rss_feed_urls:
-            log(f"Checking: {rss_url}", "info")
-            feed = feedparser.parse(rss_url)
-            latest_entries = feed.entries[:5]
-
-            for entry in latest_entries:
-                message_content = f"**{entry.title}**\n{entry.link}"
-                message_id = entry.link
-
-                if not c.execute(
-                    "SELECT * FROM sent_messages WHERE identifier=?", (message_id,)
-                ).fetchone():
-                    message = await channel.send(message_content)
-                    thread = await message.create_thread(
-                        name=entry.title, auto_archive_duration=60
-                    )
-                    c.execute(
-                        "INSERT INTO sent_messages (identifier) VALUES (?)",
-                        (message_id,),
-                    )
-                    conn.commit()
-        log("refreshing feeds: DONE", "info")
-
-
-client = aclient()
+client = RSSBot(GUILD_ID, DatabaseManager(DB_NAME))
 tree = app_commands.CommandTree(client)
 
 
-@tasks.loop(seconds=500)
+@tasks.loop(seconds=REFRESH_INTERVAL)
 async def refresh_task():
     await refresh_rss()
-
-
-@client.event
-async def on_disconnect():
-    log("Bot is disconnecting. Closing database connection.", "error")
-    conn.close()
 
 
 @tree.command(
     guild=discord.Object(id=GUILD_ID),
     name="refresh",
     description="Manually refreshes RSS feeds.",
-)  # guild specific slash command
+)
 async def refresh_feeds(interaction: discord.Interaction):
     """
     Manually refreshes RSS feeds.
     """
-    log("Triggered manual refresh", "info")
+    log("Triggered manual refresh", INFO)
     await refresh_rss()
     await interaction.response.send_message("Manually refreshed RSS feeds.")
 
@@ -161,7 +172,7 @@ async def refresh_feeds(interaction: discord.Interaction):
     guild=discord.Object(id=GUILD_ID),
     name="setup",
     description="Set up the bot to track RSS feeds in a specific channel.",
-)  # guild specific slash command
+)
 async def setup(interaction: discord.Interaction, channel_id: str, rss_url: str):
     """
     Set up the bot to track RSS feeds in a specific channel.
@@ -173,11 +184,11 @@ async def setup(interaction: discord.Interaction, channel_id: str, rss_url: str)
     setup_completed, _, refresh_interval, rss_feed_urls = get_setup_data()
     if setup_completed:
         await interaction.response.send_message(
-            f"Setup already done, to reset the bot please delete main.db"
+            f"Setup already done, to reset the bot please delete {DB_NAME}"
         )
         return
 
-    if channel_id is None or rss_url is None:
+    if not channel_id or not rss_url:
         await interaction.response.send_message(
             "Please provide the necessary arguments:\n`!setup <channel_id> <rss_url>`"
         )
@@ -185,17 +196,19 @@ async def setup(interaction: discord.Interaction, channel_id: str, rss_url: str)
 
     channel_id, setup_completed = channel_id, True
 
-    c.execute(
+    client.db_manager.c.execute(
         "INSERT OR REPLACE INTO bot_config (key, value) VALUES (?, ?)",
         ("channel_id", str(channel_id)),
     )
-    c.execute(
+    client.db_manager.c.execute(
         "INSERT OR REPLACE INTO bot_config (key, value) VALUES (?, ?)",
         ("setup_completed", "True"),
     )
 
-    c.execute("INSERT OR IGNORE INTO rss_feeds (url) VALUES (?)", (rss_url,))
-    conn.commit()
+    client.db_manager.c.execute(
+        "INSERT OR IGNORE INTO rss_feeds (url) VALUES (?)", (rss_url,)
+    )
+    client.db_manager.conn.commit()
 
     setup_completed, _, refresh_interval, rss_feed_urls = get_setup_data()
 
@@ -209,7 +222,7 @@ async def setup(interaction: discord.Interaction, channel_id: str, rss_url: str)
     guild=discord.Object(id=GUILD_ID),
     name="add_feed",
     description="Add a new RSS feed to the list.",
-)  # guild specific slash command
+)
 async def add_feed(interaction: discord.Interaction, rss_url: str):
     """
     Add a new RSS feed to the list.
@@ -230,11 +243,13 @@ async def add_feed(interaction: discord.Interaction, rss_url: str):
         )
         return
 
-    c.execute("INSERT OR IGNORE INTO rss_feeds (url) VALUES (?)", (rss_url,))
-    conn.commit()
+    client.db_manager.c.execute(
+        "INSERT OR IGNORE INTO rss_feeds (url) VALUES (?)", (rss_url,)
+    )
+    client.db_manager.conn.commit()
 
     await interaction.response.send_message(f"Added new RSS feed: {rss_url}")
-    log(f"Added feed {rss_url}", "info")
+    log(f"Added feed {rss_url}", INFO)
     await refresh_rss()
 
 
@@ -242,7 +257,7 @@ async def add_feed(interaction: discord.Interaction, rss_url: str):
     guild=discord.Object(id=GUILD_ID),
     name="list_feed",
     description="List all added RSS feeds.",
-)  # guild specific slash command
+)
 async def list_feed(interaction: discord.Interaction):
     """
     List all added RSS feeds.
@@ -250,7 +265,7 @@ async def list_feed(interaction: discord.Interaction):
     setup_completed, channel_id, refresh_interval, rss_feed_urls = get_setup_data()
     if not setup_completed:
         await interaction.response.send_message(
-            "Please complete the setup using the `!setup` command."
+            "Please complete the setup using the `/setup` command."
         )
         return
 
@@ -259,7 +274,7 @@ async def list_feed(interaction: discord.Interaction):
         return
 
     feed_list = "\n".join(rss_feed_urls)
-    log("Listed feeds!", "info")
+    log("Listed feeds!", INFO)
     await interaction.response.send_message(f"List of RSS feeds:\n{feed_list}")
 
 
@@ -267,7 +282,7 @@ async def list_feed(interaction: discord.Interaction):
     guild=discord.Object(id=GUILD_ID),
     name="remove_feed",
     description="Remove an RSS feed from the list.",
-)  # guild specific slash command
+)
 async def remove_feed(interaction: discord.Interaction, rss_url: str):
     """
     Remove an RSS feed from the list.
@@ -278,13 +293,13 @@ async def remove_feed(interaction: discord.Interaction, rss_url: str):
     setup_completed, channel_id, refresh_interval, rss_feed_urls = get_setup_data()
     if not setup_completed:
         await interaction.response.send_message(
-            "Please complete the setup using the `!setup` command."
+            "Please complete the setup using the `/setup` command."
         )
         return
 
     if not rss_url:
         await interaction.response.send_message(
-            "Please provide the RSS feed URL:\n`!remove_feed <rss_url>`"
+            "Please provide the RSS feed URL:\n`/remove_feed <rss_url>`"
         )
         return
 
@@ -294,11 +309,11 @@ async def remove_feed(interaction: discord.Interaction, rss_url: str):
         )
         return
 
-    c.execute("DELETE FROM rss_feeds WHERE url=?", (rss_url,))
-    conn.commit()
+    client.db_manager.c.execute("DELETE FROM rss_feeds WHERE url=?", (rss_url,))
+    client.db_manager.conn.commit()
 
     await interaction.response.send_message(f"Removed RSS feed: {rss_url}")
-    log(f"Removed feed {rss_url}", "info")
+    log(f"Removed feed {rss_url}", INFO)
     await refresh_rss()
 
 
@@ -306,19 +321,20 @@ async def remove_feed(interaction: discord.Interaction, rss_url: str):
     guild=discord.Object(id=GUILD_ID),
     name="print_config",
     description="Prints all values from the configuration",
-)  # guild specific slash command
+)
 async def print_config(interaction: discord.Interaction):
     """
     Print all values from bot_config.
     """
+    c = client.db_manager.conn
     setup_completed, channel_id, refresh_interval, rss_feed_urls = get_setup_data()
     if not setup_completed:
         await interaction.response.send_message(
-            "Please complete the setup using the `!setup` command."
+            "Please complete the setup using the `/setup` command."
         )
         return
 
-    config_values = c.execute("SELECT * FROM bot_config").fetchall()
+    config_values = client.db_manager.c.execute("SELECT * FROM bot_config").fetchall()
 
     if not config_values:
         await interaction.response.send_message("No values found in bot_config.")
